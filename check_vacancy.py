@@ -1,9 +1,7 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-フロール川崎中幸町 空室モニタリング
-Playwright로 봇 감지 우회
+フロール川崎中幸町 空室モニタリング - 디버그 버전
 """
 
 import smtplib
@@ -40,7 +38,21 @@ def fetch_vacancy_count():
         html = page.content()
         browser.close()
 
-    # 「フロール川崎中幸町」섹션 이후에서 「X戸」찾기
+    # ── 디버그: 핵심 부분 출력 ──
+    print("=== HTML 길이:", len(html))
+    idx = html.find("フロール川崎中幸町")
+    print("=== フロール 위치:", idx)
+    if idx >= 0:
+        print("=== 주변 500자 ===")
+        print(html[idx:idx+500])
+    
+    idx2 = html.find("募集中")
+    print("=== 첫번째 募集中 위치:", idx2)
+    if idx2 >= 0:
+        print("=== 募集中 주변 200자 ===")
+        print(html[idx2:idx2+200])
+
+    # 파싱 시도
     section = re.search(r"フロール川崎中幸町(.*)", html, re.DOTALL)
     if section:
         m = re.search(r"募集中\s*[^\d]*?(\d+)\s*戸", section.group(1))

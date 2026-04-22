@@ -127,4 +127,4 @@ def main():
 
 
 if __name__ == "__main__":
-   send_notifications(1)
+   main()

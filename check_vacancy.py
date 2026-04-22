@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Vacancy monitor for three Japanese rental sites.
-Sends email to RECIPIENT when a new vacancy appears (state transitions from 0 → positive).
+Sends email to RECIPIENT when a new vacancy appears (state transitions 0 → positive).
 """
 
 import asyncio
@@ -52,77 +52,167 @@ def save_state(state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Page fetcher
+# Helper: extract Next.js __NEXT_DATA__
 # ---------------------------------------------------------------------------
 
-async def fetch_text(browser, url: str) -> str:
-    ctx = await browser.new_context(user_agent=USER_AGENT, locale="ja-JP")
-    page = await ctx.new_page()
-    try:
-        await page.goto(url, wait_until="networkidle", timeout=60_000)
-        # Extra wait for JavaScript-rendered content
-        await page.wait_for_timeout(3_000)
-        html = await page.content()
-        return BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
-    finally:
-        await ctx.close()
+def _search_json_for_vacancy(obj, depth: int = 0) -> int | None:
+    """Recursively search a parsed JSON object for vacancy-related counts."""
+    if depth > 8:
+        return None
+    vacancy_keys = {"kūshitsu", "空室", "akitsu", "count", "total", "rooms", "units"}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if any(vk in kl for vk in ["vacant", "空室", "kushitsu", "room", "unit", "count"]):
+                if isinstance(v, int) and v >= 0:
+                    return v
+            result = _search_json_for_vacancy(v, depth + 1)
+            if result is not None:
+                return result
+    elif isinstance(obj, list):
+        for item in obj:
+            result = _search_json_for_vacancy(item, depth + 1)
+            if result is not None:
+                return result
+    return None
+
+
+def extract_next_data(html: str) -> dict | None:
+    soup = BeautifulSoup(html, "html.parser")
+    tag = soup.find("script", {"id": "__NEXT_DATA__"})
+    if tag and tag.string:
+        try:
+            return json.loads(tag.string)
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Site-specific checkers
+# Site checkers
 # ---------------------------------------------------------------------------
 
 async def check_citymobile(browser) -> int | None:
     """
-    Return number of properties with vacancies on the 川崎駅 station page.
-    Alert condition: result > 0 (was 0 before).
+    citymobile is a Next.js SPA. Property data is fetched via internal API calls.
+    Strategy:
+      1. Intercept JSON API responses and look for property/room lists.
+      2. Fallback: parse __NEXT_DATA__ embedded in HTML.
+      3. Fallback: text pattern matching after full JS render.
     """
     tag = "[citymobile]"
-    try:
-        text = await fetch_text(browser, URLS["citymobile"])
-        print(f"{tag} page chars: {len(text)}")
+    ctx = await browser.new_context(user_agent=USER_AGENT, locale="ja-JP")
+    page = await ctx.new_page()
 
-        # Strategy 1: explicit "空室あり" badge count
+    captured_json: list[tuple[str, object]] = []
+
+    async def on_response(response):
+        try:
+            ct = response.headers.get("content-type", "")
+            if "json" in ct and response.status == 200:
+                data = await response.json()
+                captured_json.append((response.url, data))
+        except Exception:
+            pass
+
+    page.on("response", on_response)
+
+    try:
+        await page.goto(URLS["citymobile"], wait_until="domcontentloaded", timeout=60_000)
+        # Wait for SPA to fetch and render property listings
+        await page.wait_for_timeout(10_000)
+        html = await page.content()
+        text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+        print(f"{tag} page chars: {len(text)}, API responses captured: {len(captured_json)}")
+
+        # --- Strategy 1: scan intercepted API responses ---
+        for url, data in captured_json:
+            print(f"{tag}   API: {url[:80]}")
+            # Look for property list arrays
+            if isinstance(data, dict):
+                for key in ("data", "items", "properties", "rooms", "results", "list"):
+                    if isinstance(data.get(key), list):
+                        items = data[key]
+                        # Count items where vacancy indicator is positive
+                        vacancy = sum(
+                            1 for item in items
+                            if isinstance(item, dict) and (
+                                item.get("vacancyCount", 0) > 0
+                                or item.get("空室数", 0) > 0
+                                or item.get("roomCount", 0) > 0
+                                or item.get("available", False)
+                            )
+                        )
+                        if vacancy > 0:
+                            print(f"{tag} API key='{key}', {vacancy} properties with vacancy")
+                            return vacancy
+                        # Even if 0, return 0 rather than None so we track state
+                        if items:
+                            print(f"{tag} API key='{key}', {len(items)} properties, 0 vacancies")
+                            return 0
+            # Try generic recursive search
+            found = _search_json_for_vacancy(data)
+            if found is not None:
+                print(f"{tag} API recursive search → {found}")
+                return found
+
+        # --- Strategy 2: __NEXT_DATA__ ---
+        next_data = extract_next_data(html)
+        if next_data:
+            found = _search_json_for_vacancy(next_data)
+            if found is not None:
+                print(f"{tag} __NEXT_DATA__ → {found}")
+                return found
+
+        # --- Strategy 3: text patterns ---
         count = text.count("空室あり")
         if count:
-            print(f"{tag} '空室あり' ×{count}")
+            print(f"{tag} text '空室あり' ×{count}")
             return count
 
-        # Strategy 2: numeric vacancy summary
         for pat in [
             r'空室\s*(\d+)\s*件',
             r'空室数[:\s：]+(\d+)',
             r'(\d+)\s*室\s*空',
             r'空き\s*(\d+)\s*件',
+            r'公開中\s*(\d+)',
         ]:
             m = re.search(pat, text)
             if m:
                 count = int(m.group(1))
-                print(f"{tag} pattern '{pat}' → {count}")
+                print(f"{tag} text pattern '{pat}' → {count}")
                 return count
 
-        print(f"{tag} no vacancy pattern found. sample:\n  {text[:400]}")
-        return 0
+        print(f"{tag} no vacancy data found. text sample:\n  {text[:500]}")
+        return None
 
     except Exception as exc:
         print(f"{tag} ERROR: {exc}")
         return None
+    finally:
+        await ctx.close()
 
 
 async def check_ur_net(browser) -> int | None:
     """
-    Return 該当空室数 (vacant rooms) on the UR Housing Kanagawa area page.
-    Alert condition: result >= 1 (was 0 before).
+    UR Housing page — server-rendered but has background XHR keeping network busy.
+    Use domcontentloaded + fixed wait to avoid networkidle timeout.
     """
     tag = "[ur_net]"
+    ctx = await browser.new_context(user_agent=USER_AGENT, locale="ja-JP")
+    page = await ctx.new_page()
     try:
-        text = await fetch_text(browser, URLS["ur_net"])
+        await page.goto(URLS["ur_net"], wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(5_000)
+        html = await page.content()
+        text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
         print(f"{tag} page chars: {len(text)}")
 
         for pat in [
             r'該当空室数\s*(\d+)\s*部屋',
             r'空室数[:\s：]+(\d+)',
             r'(\d+)\s*部屋.*?空',
+            r'空室\s*(\d+)',
         ]:
             m = re.search(pat, text)
             if m:
@@ -130,28 +220,35 @@ async def check_ur_net(browser) -> int | None:
                 print(f"{tag} pattern '{pat}' → {count}")
                 return count
 
-        print(f"{tag} no vacancy pattern found. sample:\n  {text[:400]}")
+        print(f"{tag} no vacancy pattern found. sample:\n  {text[:500]}")
         return None
 
     except Exception as exc:
         print(f"{tag} ERROR: {exc}")
         return None
+    finally:
+        await ctx.close()
 
 
 async def check_kousha(browser) -> int | None:
     """
-    Return number of 戸 (units) available on kousha-chintai.com.
-    Alert condition: result >= 1 (was 0 before).
+    kousha-chintai.com — PHP server-rendered, use domcontentloaded to avoid timeout.
     """
     tag = "[kousha]"
+    ctx = await browser.new_context(user_agent=USER_AGENT, locale="ja-JP")
+    page = await ctx.new_page()
     try:
-        text = await fetch_text(browser, URLS["kousha"])
+        await page.goto(URLS["kousha"], wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(3_000)
+        html = await page.content()
+        text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
         print(f"{tag} page chars: {len(text)}")
 
         for pat in [
             r'募集中\s*\d+\s*物件\s*(\d+)\s*戸',
             r'(\d+)\s*戸.*?募集',
             r'募集.*?(\d+)\s*戸',
+            r'(\d+)\s*戸\s*あり',
         ]:
             m = re.search(pat, text, re.DOTALL)
             if m:
@@ -159,12 +256,14 @@ async def check_kousha(browser) -> int | None:
                 print(f"{tag} pattern '{pat}' → {units}")
                 return units
 
-        print(f"{tag} no unit pattern found. sample:\n  {text[:400]}")
+        print(f"{tag} no unit pattern found. sample:\n  {text[:500]}")
         return None
 
     except Exception as exc:
         print(f"{tag} ERROR: {exc}")
         return None
+    finally:
+        await ctx.close()
 
 
 # ---------------------------------------------------------------------------
@@ -205,28 +304,20 @@ async def main() -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
 
-        # Run all three checks (sequential to avoid getting rate-limited)
         checks = [
-            ("citymobile", check_citymobile),
-            ("ur_net",     check_ur_net),
-            ("kousha",     check_kousha),
+            ("citymobile", check_citymobile, "City Mobile 川崎駅周辺",  "空室が {n} 件発生しました！"),
+            ("ur_net",     check_ur_net,     "UR都市機構 神奈川エリア", "該当空室数が {n} 部屋になりました！"),
+            ("kousha",     check_kousha,     "公社賃貸",                "募集物件が {n} 戸になりました！"),
         ]
-        labels = {
-            "citymobile": ("City Mobile 川崎駅周辺",    "空室が {n} 件発生しました！"),
-            "ur_net":     ("UR都市機構 神奈川エリア",   "該当空室数が {n} 部屋になりました！"),
-            "kousha":     ("公社賃貸",                  "募集物件が {n} 戸になりました！"),
-        }
 
-        for key, checker in checks:
+        for key, checker, label, tmpl in checks:
             result = await checker(browser)
             if result is not None:
                 prev = state.get(key, 0)
                 if result > 0 and prev == 0:
-                    title, tmpl = labels[key]
-                    msg = tmpl.format(n=result)
                     alerts.append(
-                        f"■ {title}\n"
-                        f"  {msg}\n"
+                        f"■ {label}\n"
+                        f"  {tmpl.format(n=result)}\n"
                         f"  {URLS[key]}"
                     )
                 new_state[key] = result
@@ -244,7 +335,7 @@ async def main() -> None:
         )
         send_email(subject, body)
     else:
-        print(f"[{now}] No new vacancies detected. State: {new_state}")
+        print(f"[{now}] No new vacancies. State: {new_state}")
 
 
 if __name__ == "__main__":

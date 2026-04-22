@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-フロール川崎中幸町 空室モニタリング - 디버그 버전
-"""
 
 import smtplib
 import os
@@ -38,26 +35,15 @@ def fetch_vacancy_count():
         html = page.content()
         browser.close()
 
-    # ── 디버그: 핵심 부분 출력 ──
-    print("=== HTML 길이:", len(html))
-    idx = html.find("フロール川崎中幸町")
-    print("=== フロール 위치:", idx)
-    if idx >= 0:
-        print("=== 주변 500자 ===")
-        print(html[idx:idx+500])
-    
-    idx2 = html.find("募集中")
-    print("=== 첫번째 募集中 위치:", idx2)
-    if idx2 >= 0:
-        print("=== 募集中 주변 200자 ===")
-        print(html[idx2:idx2+200])
-
-    # 파싱 시도
-    section = re.search(r"フロール川崎中幸町(.*)", html, re.DOTALL)
+    # 募集中 이후 섹션에서 <span>숫자</span>戸 패턴으로 찾기
+    # 예: <span>0</span>戸
+    section = re.search(r"募集中.*?(<span>\d+</span>物件.*?<span>(\d+)</span>戸)", html, re.DOTALL)
     if section:
-        m = re.search(r"募集中\s*[^\d]*?(\d+)\s*戸", section.group(1))
-        if m:
-            return int(m.group(1))
+        count = int(section.group(2))
+        print(f"=== 파싱 성공: {count}戸")
+        return count
+
+    print("=== 파싱 실패")
     return None
 
 

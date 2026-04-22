@@ -1,0 +1,27 @@
+name: 空室チェック (フロール川崎中幸町)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # 10분마다 실행
+  workflow_dispatch:          # 수동 실행 버튼도 활성화
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 리포지토리 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 공실 체크 & 알림
+        env:
+          GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          TO_EMAIL:           ${{ secrets.TO_EMAIL }}
+          MY_PHONE:           ${{ secrets.MY_PHONE }}
+        run: python check_vacancy.py

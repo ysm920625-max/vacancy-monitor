@@ -2,15 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 공실 모니터링 스크립트
-1. フロール川崎中幸町 (kousha-chintai) - 募集中 0→1 이상
-2. シティモバイル (citymobile) - 川崎駅 검색결과 건수 변화
-3. UR賃貸 (ur-net) - 川崎市幸区 공실 건수 변화
+1. フロール川崎中幸町 - 募集中 0戸 → 1戸 이상
+2. シティモバイル 川崎駅 - 「詳細を見る」버튼 0 → 1 이상 (공실표 출현)
+3. UR賃貸 川崎市幸区 - 該当空室数 0 → 1 이상
 """
 
 import smtplib
 import os
 import re
-import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -21,8 +20,6 @@ GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 TO_EMAIL           = os.environ["TO_EMAIL"]
 MY_PHONE           = os.environ["MY_PHONE"]
 
-SMS_GATEWAY = f"{MY_PHONE}@rakuten.jp"
-
 SITES = {
     "kousha": {
         "name": "フロール川崎中幸町",
@@ -31,7 +28,7 @@ SITES = {
     },
     "citymobile": {
         "name": "シティモバイル (川崎駅)",
-        "url": "https://www.citymobile.co.jp/keyword?keyword=%E5%B7%9D%E5%B4%8E%E9%A7%85&page=1",
+        "url": "https://www.citymobile.co.jp/line/station/1133231?name=%E5%B7%9D%E5%B4%8E%E9%A7%85",
         "state_file": "state_citymobile.txt",
     },
     "ur": {
@@ -57,50 +54,43 @@ def get_browser_page(playwright):
 
 def fetch_kousha(page):
     """フロール川崎中幸町 募集中 戸数"""
-    page.goto(SITES["kousha"]["url"], wait_until="domcontentloaded", timeout=30000)
+    page.goto(SITES["kousha"]["url"], wait_until="domcontentloaded", timeout=60000)
     html = page.content()
-    section = re.search(r"募集中.*?(<span>\d+</span>物件.*?<span>(\d+)</span>戸)", html, re.DOTALL)
+    section = re.search(r"募集中.*?<span>\d+</span>物件.*?<span>(\d+)</span>戸", html, re.DOTALL)
     if section:
-        return int(section.group(2))
+        count = int(section.group(1))
+        print(f"  [kousha] 募集中: {count}戸")
+        return count
+    print(f"  [kousha] 파싱 실패")
     return None
 
 
 def fetch_citymobile(page):
-    """シティモバイル 川崎駅 검색결과 건수"""
+    """シティモバイル 川崎駅
+    공실 있으면 「詳細を見る」버튼이 뜸 → 그 개수를 카운트
+    """
     page.goto(SITES["citymobile"]["url"], wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(4000)
     html = page.content()
 
-    # 물건 카드 수를 세기 (각 사이트 구조에 맞게)
-    # 물건 링크 수로 카운트
-    count = len(re.findall(r'href="[^"]*/detail/[^"]*"', html))
-    if count == 0:
-        # 다른 패턴 시도
-        count = len(re.findall(r'class="[^"]*property[^"]*"', html, re.IGNORECASE))
-    print(f"  [citymobile] 감지된 물건 수: {count}")
+    # 「詳細を見る」버튼 수 = 공실 건수
+    count = len(re.findall(r"詳細を見る", html))
+    print(f"  [citymobile] 公室件数 (詳細を見るボタン数): {count}")
     return count
 
 
 def fetch_ur(page):
-    """UR賃貸 川崎市幸区 공실 건수"""
+    """UR賃貸 川崎市幸区 該当空室数"""
     page.goto(SITES["ur"]["url"], wait_until="domcontentloaded", timeout=60000)
-    # JS 로딩 대기
     page.wait_for_timeout(5000)
     html = page.content()
-
-    # 「該当空室数 X部屋」패턴
-    m = re.search(r"該当空室数[^\d]*(\d+)\s*部屋", html)
+    m = re.search(r"該当空室数\s*(\d+)\s*部屋", html)
     if m:
-        return int(m.group(1))
-
-    # 물건 건수 대안
-    m2 = re.search(r"(\d+)\s*物件中", html)
-    if m2:
-        return int(m2.group(1))
-
-    # 물건 카드 수
-    count = len(re.findall(r'class="[^"]*bukken[^"]*"', html, re.IGNORECASE))
-    print(f"  [ur] 감지된 물건 수: {count}")
-    return count if count > 0 else None
+        count = int(m.group(1))
+        print(f"  [ur] 該当空室数: {count}部屋")
+        return count
+    print(f"  [ur] 파싱 실패")
+    return None
 
 
 def load_state(state_file):
@@ -160,12 +150,8 @@ def check_site(key, fetch_fn, page):
     last = load_state(site["state_file"])
     print(f"  이전: {last} → 현재: {current}")
 
-    # kousha는 0→1 이상일 때만 / 나머지는 증가하면 알림
-    should_notify = False
-    if key == "kousha":
-        should_notify = (last == 0 and current >= 1)
-    else:
-        should_notify = (current > last)
+    # 공통: 0 → 1 이상이면 알림
+    should_notify = (last == 0 and current >= 1)
 
     if should_notify:
         print(f"  🎉 새 물건 감지! 이메일 발송 중...")

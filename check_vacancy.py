@@ -135,4 +135,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+   # 테스트: 강제로 알림 발송
+    send_notifications(1)

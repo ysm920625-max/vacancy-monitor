@@ -67,7 +67,7 @@ def fetch_kousha(page):
 
 def fetch_citymobile(page):
     """シティモバイル 川崎駅 검색결과 건수"""
-    page.goto(SITES["citymobile"]["url"], wait_until="networkidle", timeout=30000)
+    page.goto(SITES["citymobile"]["url"], wait_until="domcontentloaded", timeout=60000)
     html = page.content()
 
     # 물건 카드 수를 세기 (각 사이트 구조에 맞게)
@@ -82,9 +82,9 @@ def fetch_citymobile(page):
 
 def fetch_ur(page):
     """UR賃貸 川崎市幸区 공실 건수"""
-    page.goto(SITES["ur"]["url"], wait_until="networkidle", timeout=30000)
+    page.goto(SITES["ur"]["url"], wait_until="domcontentloaded", timeout=60000)
     # JS 로딩 대기
-    page.wait_for_timeout(3000)
+    page.wait_for_timeout(5000)
     html = page.content()
 
     # 「該当空室数 X部屋」패턴

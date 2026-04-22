@@ -4,7 +4,12 @@ on:
   schedule:
     # Every 30 minutes (GitHub may delay up to ~10 min under load)
     - cron: '*/30 * * * *'
-  workflow_dispatch: # Manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Send a test email without checking sites'
+        type: boolean
+        default: false
 
 jobs:
   monitor:
@@ -34,9 +39,7 @@ jobs:
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          # Optional overrides (defaults to Gmail SSL):
-          # SMTP_SERVER: smtp.gmail.com
-          # SMTP_PORT: 465
+          TEST_MODE: ${{ inputs.test_mode }}
         run: python check_vacancy.py
 
       - name: Commit updated state

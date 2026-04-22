@@ -297,6 +297,23 @@ def send_email(subject: str, body: str) -> None:
 
 async def main() -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # TEST_MODE: skip scraping and send a dummy alert email
+    if os.environ.get("TEST_MODE", "").lower() in ("1", "true"):
+        subject = f"【テスト】空室監視メール送信確認 ({now})"
+        body = (
+            "これはテスト送信です。メールの受信を確認してください。\n\n"
+            "■ City Mobile 川崎駅周辺\n"
+            f"  {URLS['citymobile']}\n\n"
+            "■ UR都市機構 神奈川エリア\n"
+            f"  {URLS['ur_net']}\n\n"
+            "■ 公社賃貸\n"
+            f"  {URLS['kousha']}\n\n"
+            f"送信日時: {now}"
+        )
+        send_email(subject, body)
+        return
+
     state = load_state()
     new_state = dict(state)
     alerts: list[str] = []

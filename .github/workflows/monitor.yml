@@ -1,0 +1,53 @@
+name: Vacancy Monitor
+
+on:
+  schedule:
+    # Every 30 minutes (GitHub may delay up to ~10 min under load)
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Manual trigger for testing
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit state.json back
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: playwright install chromium --with-deps
+
+      - name: Run vacancy check
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          # Optional overrides (defaults to Gmail SSL):
+          # SMTP_SERVER: smtp.gmail.com
+          # SMTP_PORT: 465
+        run: python check_vacancy.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          # Only commit if state actually changed
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update vacancy state [skip ci]"
+            git push
+          else
+            echo "State unchanged — no commit needed."
+          fi

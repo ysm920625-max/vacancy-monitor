@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+공실 모니터링 스크립트
+1. フロール川崎中幸町 (kousha-chintai) - 募集中 0→1 이상
+2. シティモバイル (citymobile) - 川崎駅 검색결과 건수 변화
+3. UR賃貸 (ur-net) - 川崎市幸区 공실 건수 변화
+"""
 
 import smtplib
 import os
 import re
+import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -15,116 +22,173 @@ TO_EMAIL           = os.environ["TO_EMAIL"]
 MY_PHONE           = os.environ["MY_PHONE"]
 
 SMS_GATEWAY = f"{MY_PHONE}@rakuten.jp"
-URL         = "https://www.kousha-chintai.com/search/list.php?dcd=K120031000"
-STATE_FILE  = "vacancy_state.txt"
+
+SITES = {
+    "kousha": {
+        "name": "フロール川崎中幸町",
+        "url": "https://www.kousha-chintai.com/search/list.php?dcd=K120031000",
+        "state_file": "state_kousha.txt",
+    },
+    "citymobile": {
+        "name": "シティモバイル (川崎駅)",
+        "url": "https://www.citymobile.co.jp/keyword?keyword=%E5%B7%9D%E5%B4%8E%E9%A7%85&page=1",
+        "state_file": "state_citymobile.txt",
+    },
+    "ur": {
+        "name": "UR賃貸 川崎市幸区",
+        "url": "https://www.ur-net.go.jp/chintai/kanto/kanagawa/area/132.html",
+        "state_file": "state_ur.txt",
+    },
+}
 
 
-def fetch_vacancy_count():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="ja-JP",
-        )
-        page = context.new_page()
-        page.goto(URL, wait_until="domcontentloaded", timeout=30000)
-        html = page.content()
-        browser.close()
+def get_browser_page(playwright):
+    browser = playwright.chromium.launch(headless=True)
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        locale="ja-JP",
+    )
+    return browser, context.new_page()
 
-    # 募集中 이후 섹션에서 <span>숫자</span>戸 패턴으로 찾기
-    # 예: <span>0</span>戸
+
+def fetch_kousha(page):
+    """フロール川崎中幸町 募集中 戸数"""
+    page.goto(SITES["kousha"]["url"], wait_until="domcontentloaded", timeout=30000)
+    html = page.content()
     section = re.search(r"募集中.*?(<span>\d+</span>物件.*?<span>(\d+)</span>戸)", html, re.DOTALL)
     if section:
-        count = int(section.group(2))
-        print(f"=== 파싱 성공: {count}戸")
-        return count
-
-    print("=== 파싱 실패")
+        return int(section.group(2))
     return None
 
 
-def load_last_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
+def fetch_citymobile(page):
+    """シティモバイル 川崎駅 검색결과 건수"""
+    page.goto(SITES["citymobile"]["url"], wait_until="networkidle", timeout=30000)
+    html = page.content()
+
+    # 물건 카드 수를 세기 (각 사이트 구조에 맞게)
+    # 물건 링크 수로 카운트
+    count = len(re.findall(r'href="[^"]*/detail/[^"]*"', html))
+    if count == 0:
+        # 다른 패턴 시도
+        count = len(re.findall(r'class="[^"]*property[^"]*"', html, re.IGNORECASE))
+    print(f"  [citymobile] 감지된 물건 수: {count}")
+    return count
+
+
+def fetch_ur(page):
+    """UR賃貸 川崎市幸区 공실 건수"""
+    page.goto(SITES["ur"]["url"], wait_until="networkidle", timeout=30000)
+    # JS 로딩 대기
+    page.wait_for_timeout(3000)
+    html = page.content()
+
+    # 「該当空室数 X部屋」패턴
+    m = re.search(r"該当空室数[^\d]*(\d+)\s*部屋", html)
+    if m:
+        return int(m.group(1))
+
+    # 물건 건수 대안
+    m2 = re.search(r"(\d+)\s*物件中", html)
+    if m2:
+        return int(m2.group(1))
+
+    # 물건 카드 수
+    count = len(re.findall(r'class="[^"]*bukken[^"]*"', html, re.IGNORECASE))
+    print(f"  [ur] 감지된 물건 수: {count}")
+    return count if count > 0 else None
+
+
+def load_state(state_file):
+    if os.path.exists(state_file):
+        with open(state_file, "r") as f:
             val = f.read().strip()
-            return int(val) if val.isdigit() else 0
+            return int(val) if val.lstrip('-').isdigit() else 0
     return 0
 
 
-def save_state(count):
-    with open(STATE_FILE, "w") as f:
+def save_state(state_file, count):
+    with open(state_file, "w") as f:
         f.write(str(count))
 
 
-def send_notifications(vacancy_count):
+def send_email(site_name, url, current, last):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    subject = f"[空き情報] フロール川崎中幸町 募集中 {vacancy_count}戸！"
-    email_body = f"""\
-フロール川崎中幸町 に空き部屋が出ました！
+    subject = f"[空き情報] {site_name} に新着物件！"
+    body = f"""\
+{site_name} に新着物件が出ました！
 
-  募集中 : {vacancy_count}戸
+  以前: {last}件 → 現在: {current}件
   確認時刻: {now_str}
 
 ▶ 物件ページを確認する
-{URL}
+{url}
 
 ---
 このメールは自動監視スクリプトが送信しました。
 """
-    sms_body = f"【空室】フロール川崎中幸町 {vacancy_count}戸！\n{URL}"
-
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"]    = GMAIL_ADDRESS
         msg["To"]      = TO_EMAIL
-        msg.attach(MIMEText(email_body, "plain", "utf-8"))
+        msg.attach(MIMEText(body, "plain", "utf-8"))
         server.sendmail(GMAIL_ADDRESS, TO_EMAIL, msg.as_string())
-        print(f"  이메일 발송 완료 -> {TO_EMAIL}")
-
-        sms = MIMEText(sms_body, "plain", "utf-8")
-        sms["Subject"] = subject
-        sms["From"]    = GMAIL_ADDRESS
-        sms["To"]      = SMS_GATEWAY
-        server.sendmail(GMAIL_ADDRESS, SMS_GATEWAY, sms.as_string())
-        print(f"  SMS 발송 완료 -> {SMS_GATEWAY}")
+    print(f"  이메일 발송 완료 -> {TO_EMAIL}")
 
 
-def main():
+def check_site(key, fetch_fn, page):
+    site = SITES[key]
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now_str}] 체크 시작...")
+    print(f"\n[{now_str}] {site['name']} 체크 중...")
 
     try:
-        current = fetch_vacancy_count()
+        current = fetch_fn(page)
     except Exception as e:
-        print(f"[{now_str}] 페이지 조회 실패: {e}")
+        print(f"  ❌ 조회 실패: {e}")
         return
 
     if current is None:
-        print(f"[{now_str}] 戸数を取得できませんでした")
+        print(f"  ⚠️  건수를 가져오지 못했습니다")
         return
 
-    last = load_last_state()
-    print(f"[{now_str}] 이전: {last}戸 -> 현재: {current}戸")
+    last = load_state(site["state_file"])
+    print(f"  이전: {last} → 현재: {current}")
 
-    if last == 0 and current >= 1:
-        print(f"[{now_str}] 공실 발생! 알림 발송 중...")
-        try:
-            send_notifications(current)
-            print(f"[{now_str}] 알림 완료")
-        except Exception as e:
-            print(f"[{now_str}] 알림 발송 실패: {e}")
+    # kousha는 0→1 이상일 때만 / 나머지는 증가하면 알림
+    should_notify = False
+    if key == "kousha":
+        should_notify = (last == 0 and current >= 1)
     else:
-        print(f"[{now_str}] 변동 없음")
+        should_notify = (current > last)
 
-    save_state(current)
+    if should_notify:
+        print(f"  🎉 새 물건 감지! 이메일 발송 중...")
+        try:
+            send_email(site["name"], site["url"], current, last)
+        except Exception as e:
+            print(f"  ❌ 이메일 발송 실패: {e}")
+    else:
+        print(f"  — 변동 없음")
+
+    save_state(site["state_file"], current)
+
+
+def main():
+    with sync_playwright() as p:
+        browser, page = get_browser_page(p)
+        try:
+            check_site("kousha",     fetch_kousha,     page)
+            check_site("citymobile", fetch_citymobile, page)
+            check_site("ur",         fetch_ur,         page)
+        finally:
+            browser.close()
 
 
 if __name__ == "__main__":
-   main()
+    main()

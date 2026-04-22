@@ -2,8 +2,8 @@ name: Vacancy Monitor
 
 on:
   schedule:
-    # Every 30 minutes (GitHub may delay up to ~10 min under load)
-    - cron: '*/30 * * * *'
+    # Every 5 minutes
+    - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       test_mode:

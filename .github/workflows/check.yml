@@ -1,0 +1,27 @@
+name: 空室チェック
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Playwright 설치
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
+      - name: 공실 체크
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
+          MY_PHONE: ${{ secrets.MY_PHONE }}
+        run: python check_vacancy.py
